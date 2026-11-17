@@ -18,6 +18,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from database import DB_PATH, db, init_db
 import auth
+import geocode
 import personalization
 import social
 import groups
@@ -85,23 +86,30 @@ def fetch_local_places(latitude: float, longitude: float):
     def area(radius):
         return f'(around:{radius},{latitude},{longitude})'
     # Sights within 5 km, food within 2.5 km, characteristic shops within 1.5 km: keeps dense city centres fast.
-    query = f'[out:json][timeout:{int(OVERPASS_TIMEOUT)}];(' + ''.join([
-        f'nwr["tourism"~"^(attraction|museum|viewpoint|gallery|artwork|zoo|aquarium|theme_park)$"]["name"]{area(5000)};',
-        f'nwr["historic"~"^(castle|monument|memorial|ruins|archaeological_site|city_gate|church)$"]["name"]{area(5000)};',
-        f'nwr["amenity"~"^(theatre|cinema|arts_centre|marketplace)$"]["name"]{area(5000)};',
-        f'nwr["leisure"~"^(park|garden|nature_reserve)$"]["name"]{area(5000)};',
-        f'nwr["natural"~"^(beach|peak)$"]["name"]{area(5000)};',
-        f'nwr["amenity"~"^(cafe|restaurant|fast_food|bar|pub|ice_cream)$"]["name"]{area(2500)};',
-        f'nwr["shop"~"^(books|gift|souvenir|deli|confectionery|bakery|pastry|chocolate|cheese|wine|art|antiques|craft|music|clothes|shoes|jewelry|boutique|fashion_accessories|bag|perfumery|cosmetics|ice_cream|tea|coffee)$"]["name"]{area(1500)};',
-    ]) + ');out center tags 1500;'
-    def ask(client, url):
-        response = client.post(url, data={'data': query}, headers={'User-Agent': 'RoamTraveller/1.0 personal travel prototype', 'Accept': 'application/json'})
-        response.raise_for_status()
-        result = response.json()
-        if 'remark' in result and not result.get('elements'):
-            raise ValueError('Incomplete Overpass answer')
-        return result
-    try:
+    # The second query is a smaller net for cities such as Tokyo, where the full query often times out.
+    queries = [
+        f'[out:json][timeout:{int(OVERPASS_TIMEOUT)}];(' + ''.join([
+            f'nwr["tourism"~"^(attraction|museum|viewpoint|gallery|artwork|zoo|aquarium|theme_park)$"]["name"]{area(5000)};',
+            f'nwr["historic"~"^(castle|monument|memorial|ruins|archaeological_site|city_gate|church)$"]["name"]{area(5000)};',
+            f'nwr["amenity"~"^(theatre|cinema|arts_centre|marketplace)$"]["name"]{area(5000)};',
+            f'nwr["leisure"~"^(park|garden|nature_reserve)$"]["name"]{area(5000)};',
+            f'nwr["natural"~"^(beach|peak)$"]["name"]{area(5000)};',
+            f'nwr["amenity"~"^(cafe|restaurant|fast_food|bar|pub|ice_cream)$"]["name"]{area(2500)};',
+            f'nwr["shop"~"^(books|gift|souvenir|deli|confectionery|bakery|pastry|chocolate|cheese|wine|art|antiques|craft|music|clothes|shoes|jewelry|boutique|fashion_accessories|bag|perfumery|cosmetics|ice_cream|tea|coffee)$"]["name"]{area(1500)};',
+        ]) + ');out center tags 1500;',
+        f'[out:json][timeout:15];('
+        f'nwr["tourism"~"^(attraction|museum|viewpoint)$"]["name"]{area(3000)};'
+        f'nwr["amenity"~"^(cafe|restaurant)$"]["name"]{area(1500)};'
+        f');out center tags 80;',
+    ]
+    def query_overpass(query):
+        def ask(client, url):
+            response = client.post(url, data={'data': query}, headers={'User-Agent': 'RoamTraveller/1.0 personal travel prototype', 'Accept': 'application/json'})
+            response.raise_for_status()
+            result = response.json()
+            if 'remark' in result and not result.get('elements'):
+                raise ValueError('Incomplete Overpass answer')
+            return result
         payload = None
         with httpx.Client(timeout=httpx.Timeout(OVERPASS_TIMEOUT + 3, connect=4)) as client:
             pool = ThreadPoolExecutor(max_workers=len(OVERPASS_URLS))
@@ -119,6 +127,15 @@ def fetch_local_places(latitude: float, longitude: float):
                 for future in futures:
                     future.cancel()
                 pool.shutdown(wait=False, cancel_futures=True)
+        return payload
+    try:
+        payload = None
+        for index, query in enumerate(queries):
+            payload = query_overpass(query)
+            if payload is not None:
+                if index:
+                    log.info('overpass: full query failed, using compact results')
+                break
         if payload is None:
             raise ValueError('No Overpass server available')
         result = []
@@ -132,7 +149,7 @@ def fetch_local_places(latitude: float, longitude: float):
                         'Ristorante' if tags.get('amenity') in ('restaurant', 'fast_food') else
                         'Parco' if tags.get('leisure') in ('park', 'garden', 'nature_reserve') else 'Attrazione')
             address = ' '.join(filter(None, [tags.get('addr:street'), tags.get('addr:housenumber'), tags.get('addr:city')]))
-            result.append(dict(id=f"osm-{element['type']}-{element['id']}", name=tags.get('name:it', tags['name']), category=category,
+            result.append(dict(id=f"osm-{element['type']}-{element['id']}", name=tags.get('name:it') or tags.get('name:en') or tags['name'], category=category,
                 latitude=center['lat'], longitude=center['lon'], description=address or 'Luogo censito su OpenStreetMap. Verifica orari e disponibilità prima della visita.',
                 symbol='bag.fill' if category == 'Negozio' else 'cup.and.saucer.fill' if category == 'Caffè' else 'fork.knife' if category == 'Ristorante' else 'leaf.fill' if category == 'Parco' else 'building.columns.fill'))
         with db() as c:
@@ -216,6 +233,11 @@ def places(latitude: float, longitude: float):
     # Keep all categories discoverable, even in dense shopping districts.
     selected = [p for category in ['Attrazione', 'Caffè', 'Negozio', 'Ristorante', 'Parco'] for p in [p for p in nearby if p['category'] == category and p['distance'] <= 5][:100]]
     return sorted(selected, key=lambda p: p['distance'])
+
+@app.get('/geocode')
+def geocode_place(q: str = ''):
+    """City, region, island or country for a trip. Countries use the capital's coordinates."""
+    return geocode.resolve(q)
 
 @app.get('/trips')
 def trips(user: User):

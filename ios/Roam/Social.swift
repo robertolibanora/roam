@@ -710,6 +710,7 @@ struct GroupOnboardingView: View {
     @State private var destinationText = ""
     @State private var destination: CityResult?
     @State private var locating = false
+    @State private var locateNote: String?
     @State private var title = ""
     @State private var start = Calendar.current.date(byAdding: .day, value: 14, to: Date()) ?? Date()
     @State private var end = Calendar.current.date(byAdding: .day, value: 16, to: Date()) ?? Date()
@@ -776,10 +777,10 @@ struct GroupOnboardingView: View {
     }
     private var whereStep: some View {
         VStack(alignment: .leading, spacing: 14) {
-            stepTitle("Dove andate?", "Una città, un’isola o una regione: ROAM cercherà lì i luoghi del piano.")
+            stepTitle("Dove andate?", "Una città, un’isola, una regione o un paese: ROAM cercherà lì i luoghi del piano.")
             HStack(spacing: 10) {
                 Image(systemName: "mappin.and.ellipse").foregroundStyle(RoamStyle.red)
-                TextField("Es. Lisbona, Sicilia, Verona…", text: $destinationText).font(.body).autocorrectionDisabled().submitLabel(.next)
+                TextField("Es. Tokyo, Spagna, Sicilia…", text: $destinationText).font(.body).autocorrectionDisabled().submitLabel(.next)
                 if locating { ProgressView() }
             }.padding(.horizontal, 16).padding(.vertical, 14).roamGlassCapsule()
             if let destination {
@@ -799,7 +800,7 @@ struct GroupOnboardingView: View {
                     TextField("Viaggio a \(destination.name)", text: $title).padding(.horizontal, 16).padding(.vertical, 12).roamGlassCapsule()
                 }
             } else if destinationText.trimmingCharacters(in: .whitespaces).count >= 2 && !locating {
-                Text("Non trovo “\(destinationText)”. Prova con il nome di una città.").font(.caption).foregroundStyle(.secondary)
+                Text(locateNote ?? "Non trovo “\(destinationText)”. Prova con la città, la regione o il paese.").font(.caption).foregroundStyle(locateNote == nil ? Color.secondary : RoamStyle.red)
             }
         }
     }
@@ -890,12 +891,15 @@ struct GroupOnboardingView: View {
     }
     private func locate() async {
         let text = destinationText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard text.count >= 2 else { destination = nil; return }
+        guard text.count >= 2 else { destination = nil; locateNote = nil; return }
         try? await Task.sleep(for: .milliseconds(450))
         guard !Task.isCancelled else { return }
         locating = true; defer { locating = false }
-        let found = await store.geocodeDestination(text)
-        if !Task.isCancelled { destination = found }
+        let outcome = await store.geocodeOutcome(text)
+        if !Task.isCancelled {
+            destination = outcome.place
+            locateNote = outcome.place == nil ? outcome.failure : nil
+        }
     }
     private func create() async {
         guard let destination else { return }

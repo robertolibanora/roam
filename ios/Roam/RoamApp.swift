@@ -135,6 +135,15 @@ struct CityResult: Equatable {
     var id: String { "\(name)|\(Int(coordinate.latitude * 100))|\(Int(coordinate.longitude * 100))" }
     static func == (a: CityResult, b: CityResult) -> Bool { a.id == b.id }
 }
+struct GeocodeHit: Decodable {
+    let name: String
+    let region, country: String?
+    let latitude, longitude: Double
+}
+struct GeocodeOutcome {
+    var place: CityResult?
+    var failure: String?
+}
 struct SocialFeedResponse: Decodable { let posts: [SocialPost]; let has_more: Bool }
 struct SocialComment: Decodable, Identifiable {
     let id, author, body, created_at: String
@@ -461,18 +470,6 @@ struct Message: Identifiable { var id = UUID().uuidString; let text: String; let
             placePosts[place.id] = result.posts
         } catch {}
     }
-    // Search by city: Apple's geocoder finds the town, the backend loads its places and posts.
-    func findCity(_ text: String) async -> CityResult? {
-        let folded = { (v: String) in v.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current) }
-        let wanted = folded(text)
-        guard let marks = try? await CLGeocoder().geocodeAddressString(text, in: nil, preferredLocale: Locale(identifier: "it_IT")) else { return nil }
-        for mark in marks {
-            guard let coordinate = mark.location?.coordinate else { continue }
-            let name = [mark.locality, mark.subAdministrativeArea].compactMap { $0 }.first { folded($0).hasPrefix(wanted) || wanted.hasPrefix(folded($0)) }
-            if let name { return CityResult(name: name, region: mark.administrativeArea, country: mark.country, coordinate: coordinate) }
-        }
-        return nil
-    }
     // City results arrive in two steps: Apple Maps first (fast), then OpenStreetMap via the backend (richer, slower).
     func cityBackendPlaces(_ city: CityResult) async -> [Place] {
         let c = city.coordinate
@@ -633,12 +630,66 @@ struct Message: Identifiable { var id = UUID().uuidString; let text: String; let
         guard token != nil, let list: [TripGroup] = try? await request("/groups") else { return }
         groups = list; unreadChats = conversations.filter { $0.unread > 0 }.count + list.filter { $0.unread > 0 }.count
     }
-    // Any place on Earth for a group trip: towns, regions, islands.
-    func geocodeDestination(_ text: String) async -> CityResult? {
-        guard let marks = try? await CLGeocoder().geocodeAddressString(text, in: nil, preferredLocale: Locale(identifier: "it_IT")),
-              let mark = marks.first, let coordinate = mark.location?.coordinate else { return nil }
-        let name = mark.locality ?? mark.name ?? mark.administrativeArea ?? text
-        return CityResult(name: name, region: mark.locality == nil ? mark.country : mark.administrativeArea, country: mark.country, coordinate: coordinate)
+    // Towns, regions, islands and countries. Italian names are resolved on the backend
+    // (Tokyo is a prefecture, Spagna a country). Apple is only a fallback when that
+    // service cannot be reached, so a phone in Italy does not turn Spagna into Piazza di Spagna.
+    func geocodeOutcome(_ text: String) async -> GeocodeOutcome {
+        let query = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard query.count >= 2 else { return GeocodeOutcome() }
+        do {
+            return GeocodeOutcome(place: try await geocodeOnServer(query))
+        } catch let error as NSError where error.domain == "API" && (error.code == 404 || error.code == 422) {
+            return GeocodeOutcome()
+        } catch let error as NSError where error.domain == "API" {
+            // A definitive server answer (the country is known but its capital is not, or the geocoder is down)
+            // must not fall through to Apple: near Italy, "Spagna" becomes Piazza di Spagna.
+            return GeocodeOutcome(failure: error.localizedDescription)
+        } catch {
+            if let apple = await appleGeocode(query) { return GeocodeOutcome(place: apple) }
+            return GeocodeOutcome(failure: "Ricerca destinazioni non disponibile. Controlla la connessione.")
+        }
+    }
+    private func geocodeOnServer(_ text: String) async throws -> CityResult {
+        let hit: GeocodeHit = try await request("/geocode?q=" + queryValue(text))
+        return CityResult(name: hit.name, region: blankToNil(hit.region), country: blankToNil(hit.country), coordinate: .init(latitude: hit.latitude, longitude: hit.longitude))
+    }
+    private func blankToNil(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+    /// Used only when the backend cannot be reached. Matches the query against the city,
+    /// the prefecture (Tokyo) and the country (Spagna), and prefers that hit over the first
+    /// result, which location bias often pins to somewhere in Italy.
+    private func appleGeocode(_ text: String) async -> CityResult? {
+        let locale = Locale(identifier: "it_IT")
+        let fold: (String) -> String = { $0.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: locale) }
+        let wanted = fold(text)
+        guard let marks = try? await CLGeocoder().geocodeAddressString(text, in: nil, preferredLocale: locale) else { return nil }
+        func labels(_ mark: CLPlacemark) -> [String] {
+            var values: [String?] = [mark.locality, mark.subLocality, mark.subAdministrativeArea, mark.administrativeArea, mark.country, mark.name, mark.inlandWater, mark.ocean]
+            values.append(contentsOf: mark.areasOfInterest ?? [])
+            return values.compactMap { $0 }.map(fold)
+        }
+        func score(_ mark: CLPlacemark) -> Int {
+            let names = labels(mark)
+            guard names.contains(where: { $0 == wanted || $0.hasPrefix(wanted) || ($0.count >= 4 && wanted.hasPrefix($0)) }) else { return 0 }
+            if fold(mark.country ?? "") == wanted { return 100 }
+            if fold(mark.locality ?? "") == wanted { return 90 }
+            if fold(mark.administrativeArea ?? "") == wanted { return 85 }
+            if fold(mark.name ?? "") == wanted { return 70 }
+            return names.contains(wanted) ? 60 : 30
+        }
+        let ranked = marks.compactMap { mark -> (Int, CLPlacemark)? in
+            guard mark.location != nil else { return nil }
+            let value = score(mark)
+            return value > 0 ? (value, mark) : nil
+        }
+        guard let mark = ranked.max(by: { $0.0 < $1.0 })?.1, let coordinate = mark.location?.coordinate else { return nil }
+        let display = [mark.locality, mark.administrativeArea, mark.name, mark.country, mark.inlandWater].compactMap { $0 }.first { name in
+            let folded = fold(name)
+            return folded == wanted || folded.hasPrefix(wanted) || (folded.count >= 4 && wanted.hasPrefix(folded))
+        } ?? text
+        return CityResult(name: display, region: mark.locality == nil ? nil : mark.administrativeArea, country: mark.country, coordinate: coordinate)
     }
     func refreshUnread() async {
         guard token != nil, let result: UnreadResponse = try? await request("/dm/unread") else { return }
@@ -2539,6 +2590,7 @@ struct SearchView: View {
     @State private var cityPlaces: [Place] = []
     @State private var cityPosts: [SocialPost] = []
     @State private var cityLoading = false
+    @State private var cityNote: String?
     @State private var cityCategory = "Tutti"
     @State private var openedPostID: String?
     @FocusState private var fieldFocused: Bool
@@ -2565,7 +2617,7 @@ struct SearchView: View {
                     }.padding(.horizontal, 24)
                     HStack(spacing: 12) {
                         Image(systemName: "magnifyingglass").foregroundStyle(RoamStyle.red)
-                        TextField(scope == "Persone" ? "Cerca viaggiatori" : scope == "Attività" ? "Cosa ti va di fare?" : "Cerca città, luoghi e attrazioni", text: $query)
+                        TextField(scope == "Persone" ? "Cerca viaggiatori" : scope == "Attività" ? "Cosa ti va di fare?" : "Cerca città, paesi e luoghi", text: $query)
                             .font(.subheadline).submitLabel(.search).autocorrectionDisabled().focused($fieldFocused)
                         if !query.isEmpty {
                             Button { query = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }.accessibilityLabel("Cancella ricerca")
@@ -2598,11 +2650,15 @@ struct SearchView: View {
         }
     }
     @ViewBuilder private var placesSection: some View {
+        // A destination does not need the phone's position: Tokyo and Spagna resolve on their own.
+        if let city { citySection(city) }
+        else if cityLoading { HStack(spacing: 10) { ProgressView(); Text("Cerco la destinazione…").font(.subheadline).foregroundStyle(.secondary) }.padding(.horizontal, 24) }
+        else if trimmed.count >= 3, let cityNote { Text(cityNote).font(.subheadline).foregroundStyle(.secondary).padding(.horizontal, 24) }
         if location.coordinate == nil && store.knownPlaces.isEmpty {
-            RoamEmptyState(icon: "location.magnifyingglass", title: "Dove ti trovi?", message: "Attiva la posizione per cercare luoghi e attrazioni vicino a te.", action: "Usa la mia posizione") { location.request() }.padding(.top, 24)
+            if city == nil {
+                RoamEmptyState(icon: "location.magnifyingglass", title: "Dove ti trovi?", message: "Attiva la posizione per cercare luoghi e attrazioni vicino a te. Puoi comunque cercare una città o un paese.", action: "Usa la mia posizione") { location.request() }.padding(.top, 24)
+            }
         } else {
-            if let city { citySection(city) }
-            else if cityLoading { HStack(spacing: 10) { ProgressView(); Text("Cerco la città…").font(.subheadline).foregroundStyle(.secondary) }.padding(.horizontal, 24) }
             resultsHeader(trimmed.isEmpty ? "VICINO A TE" : city == nil ? "RISULTATI" : "ALTRI RISULTATI")
             placeList
             appleHint
@@ -2683,9 +2739,17 @@ struct SearchView: View {
         }
     }
     private func searchCity() async {
-        guard scope == "Luoghi", trimmed.count >= 3, store.appleSearchEnabled else { city = nil; cityPlaces = []; cityPosts = []; return }
+        guard scope == "Luoghi", trimmed.count >= 3 else { city = nil; cityPlaces = []; cityPosts = []; cityNote = nil; return }
         cityLoading = true; defer { cityLoading = false }
-        guard let found = await store.findCity(trimmed), !Task.isCancelled else { if !Task.isCancelled { city = nil; cityPlaces = []; cityPosts = [] }; return }
+        let outcome = await store.geocodeOutcome(trimmed)
+        guard let found = outcome.place, !Task.isCancelled else {
+            if !Task.isCancelled {
+                city = nil; cityPlaces = []; cityPosts = []
+                cityNote = outcome.failure ?? "Non trovo “\(trimmed)”. Prova con la città, la regione o il paese."
+            }
+            return
+        }
+        cityNote = nil
         if found == city && !cityPlaces.isEmpty { return }
         city = found; cityCategory = "Tutti"; cityPlaces = []; cityPosts = []
         async let osm = store.cityBackendPlaces(found)
