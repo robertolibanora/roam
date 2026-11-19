@@ -4,7 +4,19 @@ Prototipo nativo **SwiftUI per iOS 17+**, con backend **FastAPI + SQLite** e int
 
 ## Avvio
 
-Per il progetto già configurato usa `./start.sh` (backend e installazione iPhone), oppure `./start.sh --no-ios` per il solo backend. Lo script attende fino a 120 secondi, mostra lo stato durante il caricamento e verifica `/health` senza proxy. Puoi cambiare l'attesa con `ROAM_START_TIMEOUT=180 ./start.sh --no-ios`. Il log è in `backend/server.log`.
+Un solo comando avvia il backend e ricompila l’app sull’iPhone:
+
+```sh
+./w.sh                  # backend + reinstalla l'app su tutti gli iPhone associati (cavo o stessa Wi-Fi)
+./start.sh              # backend + build e installazione sull'iPhone
+./start.sh --sim        # backend + build e avvio sul simulatore
+./start.sh --no-ios     # solo backend
+./start.sh --ios-only   # solo build e installazione
+./start.sh --test       # esegue prima i test del backend (si combina con le altre)
+./start.sh --stop       # ferma il backend
+```
+
+Il backend riparte sempre con il codice aggiornato; lo script attende fino a 120 secondi (`ROAM_START_TIMEOUT`) e verifica `/health` senza proxy. Log: `backend/server.log` e `ios/install.log`. La build iOS parte da una copia in `/tmp/roam-src-ios`, perché sulla Scrivania sincronizzata con iCloud `actool` non legge gli asset; se iCloud ha tolto dal Mac il contenuto dei file (“Ottimizza spazio”), lo script li riscarica prima di partire. Per evitarlo del tutto: Finder → tasto destro sulla cartella del progetto → **Mantieni scaricato**.
 
 Installazione manuale, dal terminale nella cartella del progetto:
 
@@ -81,7 +93,7 @@ Per riattivare Gemini imposta `CHAT_PROVIDER=gemini`. Inserisci la chiave in `ba
 
 La build per l'iPhone usa come URL iniziale `http://100.90.158.14:8000`, indirizzo Tailscale del Mac: attiva Tailscale anche sull'iPhone. Il Mac e il backend devono restare accesi. Puoi cambiare URL dal profilo per usare la rete Wi-Fi locale.
 
-Per installare sul dispositivo già associato: `ios/install.sh`. Richiede un account Apple attivo in Xcode → Settings → Accounts, un profilo di provisioning valido e iPhone raggiungibile e sbloccato.
+Per installare sul dispositivo già associato: `./start.sh --ios-only` (o `ios/install.sh`). Richiede un account Apple attivo in Xcode → Settings → Accounts, un profilo di provisioning valido e iPhone raggiungibile e sbloccato.
 
 ## Ricerca alternativa con Mappe Apple
 
@@ -122,6 +134,8 @@ Ogni post è sempre collegato a un luogo: il composer richiede foto, didascalia 
 Il Feed mostra post a tutta larghezza: autore e luogo in alto, foto 4:5, azioni (commenta, condividi, Portami qui, salva), valutazione, didascalia espandibile, conteggio commenti e data relativa. Il doppio tocco sulla foto salva il post. Lo scorrimento carica automaticamente altri post.
 
 Dal menu ⋯ di un tuo post puoi eliminarlo, previa conferma: il post e i suoi commenti vengono rimossi da Feed e Profilo. Le recensioni importate dai commenti dei luoghi non sono tuoi post e non sono eliminabili da qui.
+
+In cima al Feed due schede, **Post** e **Trip**. Un *trip* è una vacanza completa raccontata come raccolta dei tuoi post: titolo, destinazione, date, racconto e almeno due post scelti dalla griglia (le date seguono i post finché non le modifichi). Nel feed appare come copertina a mosaico con giorni, post e luoghi; il dettaglio mostra la mappa del viaggio e le tappe giorno per giorno. Filtri: Seguiti, Tutti, I miei. Eliminare un trip toglie solo la raccolta, i post restano; un trip rimasto con un solo post scompare. API: `GET/POST /feed/trips`, `GET/DELETE /feed/trips/{id}`. Viaggi demo: `.venv/bin/python seed.py --trips` (non distruttivo, fa un backup).
 
 Il Profilo mostra foto, contatori (post, viaggi, mete), bio, “Modifica profilo”, “Nuovo post” e la griglia 3 colonne dei tuoi post; toccandone uno si scorre tra tutti i tuoi post. Privacy, posizione e connessione al backend sono nell'icona ingranaggio.
 

@@ -9,10 +9,10 @@
   A00000000000000000000003 = {isa = PBXGroup; children = (A00000000000000000000006,A00000000000000000000004); sourceTree = "<group>";};
   A00000000000000000000004 = {isa = PBXGroup; children = (A00000000000000000000007); name = Products; sourceTree = "<group>";};
   A00000000000000000000005 = {isa = PBXNativeTarget; buildConfigurationList = A00000000000000000000008; buildPhases = (A00000000000000000000009,A0000000000000000000000A,A0000000000000000000000B); buildRules = (); dependencies = (); name = Roam; productName = Roam; productReference = A00000000000000000000007; productType = "com.apple.product-type.application";};
-  A00000000000000000000006 = {isa = PBXGroup; children = (A0000000000000000000000C,A00000000000000000000015,A0000000000000000000000D,A0000000000000000000000E); path = Roam; sourceTree = "<group>";};
+  A00000000000000000000006 = {isa = PBXGroup; children = (A0000000000000000000000C,A00000000000000000000015,A00000000000000000000017,A0000000000000000000000D,A0000000000000000000000E); path = Roam; sourceTree = "<group>";};
   A00000000000000000000007 = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Roam.app; sourceTree = BUILT_PRODUCTS_DIR;};
   A00000000000000000000008 = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000012,A00000000000000000000013); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;};
-  A00000000000000000000009 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A0000000000000000000000F,A00000000000000000000016); runOnlyForDeploymentPostprocessing = 0;};
+  A00000000000000000000009 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A0000000000000000000000F,A00000000000000000000016,A00000000000000000000018); runOnlyForDeploymentPostprocessing = 0;};
   A0000000000000000000000A = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0;};
   A0000000000000000000000B = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000014); runOnlyForDeploymentPostprocessing = 0;};
   A0000000000000000000000C = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoamApp.swift; sourceTree = "<group>";};
@@ -21,6 +21,8 @@
   A0000000000000000000000F = {isa = PBXBuildFile; fileRef = A0000000000000000000000C;};
   A00000000000000000000015 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Social.swift; sourceTree = "<group>";};
   A00000000000000000000016 = {isa = PBXBuildFile; fileRef = A00000000000000000000015;};
+  A00000000000000000000017 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Trips.swift; sourceTree = "<group>";};
+  A00000000000000000000018 = {isa = PBXBuildFile; fileRef = A00000000000000000000017;};
   A00000000000000000000014 = {isa = PBXBuildFile; fileRef = A0000000000000000000000E;};
   A00000000000000000000010 = {isa = XCBuildConfiguration; buildSettings = {SDKROOT = iphoneos; IPHONEOS_DEPLOYMENT_TARGET = 17.0; CLANG_ENABLE_MODULES = YES;}; name = Debug;};
   A00000000000000000000011 = {isa = XCBuildConfiguration; buildSettings = {SDKROOT = iphoneos; IPHONEOS_DEPLOYMENT_TARGET = 17.0; CLANG_ENABLE_MODULES = YES;}; name = Release;};

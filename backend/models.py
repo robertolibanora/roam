@@ -127,6 +127,28 @@ class SocialComment(Base):
     __table_args__ = (Index('social_comments_post', 'post_id', 'created_at'),)
 
 
+class TripStory(Base):
+    """A complete holiday shared in the feed: a collection of the author's own posts."""
+    __tablename__ = 'trip_stories'
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    user_id: Mapped[int | None] = mapped_column(Integer)  # author account; NULL for demo travellers
+    author: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    destination: Mapped[str] = mapped_column(Text, nullable=False)
+    start_date: Mapped[str] = mapped_column(Text, nullable=False)  # YYYY-MM-DD
+    end_date: Mapped[str] = mapped_column(Text, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False, server_default='')
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    __table_args__ = (Index('trip_stories_user', 'user_id', 'created_at'), Index('trip_stories_created', 'created_at'))
+
+
+class TripStoryPost(Base):
+    __tablename__ = 'trip_story_posts'
+    story_id: Mapped[str] = mapped_column(Text, ForeignKey('trip_stories.id', ondelete='CASCADE'), primary_key=True)
+    post_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    __table_args__ = (Index('trip_story_posts_post', 'post_id'),)
+
+
 class Follow(Base):
     """follower_id follows a person: 'u:<account id>' or 'n:<author name>' for travellers without an account."""
     __tablename__ = 'follows'

@@ -8,6 +8,7 @@
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>1.0</string>
 <key>CFBundleVersion</key><string>1</string>
+<key>RoamBackendCandidates</key><string>$(ROAM_BACKEND_CANDIDATES)</string>
 <key>UILaunchScreen</key><dict/>
 <key>NSLocationWhenInUseUsageDescription</key><string>Roam usa la tua posizione per calcolare le distanze e suggerire luoghi vicini.</string>
 <key>NSLocalNetworkUsageDescription</key><string>Connessione al backend FastAPI sulla tua rete locale.</string>

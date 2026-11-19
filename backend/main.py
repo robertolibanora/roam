@@ -22,6 +22,7 @@ import geocode
 import personalization
 import social
 import groups
+import stories
 
 load_dotenv(Path(__file__).with_name('.env'))
 import logging
@@ -34,6 +35,7 @@ app = FastAPI(title='Roam Traveller API', version='1.2.0', dependencies=[Depends
 app.include_router(auth.router)
 app.include_router(social.router)
 app.include_router(groups.router)
+app.include_router(stories.router)
 User = Annotated[dict, Depends(auth.current_user)]
 init_db()  # first start: create every table from models.py, keep existing data
 personalization.bootstrap_from_history(1)  # once: seed the AI memory from existing likes, posts, trips
@@ -524,6 +526,7 @@ def delete_social_post(post_id: str, user: User):
             raise HTTPException(403, 'Puoi eliminare solo i tuoi post')
         c.execute('DELETE FROM social_comments WHERE post_id=?', (post_id,))
         c.execute('DELETE FROM post_saves WHERE post_id=?', (post_id,))
+        stories.forget_post(c, post_id)
         c.execute('DELETE FROM social_posts WHERE id=?', (post_id,))
 
 @app.post('/feed/posts', status_code=201)

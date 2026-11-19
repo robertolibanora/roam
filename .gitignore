@@ -9,3 +9,5 @@ xcuserdata/
 .env
 backend/server.log
 ios/install.log
+ios/build/
+ios/install-logs/

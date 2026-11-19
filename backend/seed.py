@@ -3,6 +3,7 @@
 Uso (dalla cartella backend):
     .venv/bin/python seed.py            # inserisce/aggiorna i dati demo
     .venv/bin/python seed.py --remove   # rimuove solo i dati demo
+    .venv/bin/python seed.py --trips    # aggiunge solo i viaggi demo del feed e le loro tappe
 
 Tutte le righe create hanno id con prefisso "seed-": lo script è idempotente
 e non tocca i dati reali (viaggi, profilo, post pubblicati dall'app).
@@ -168,6 +169,20 @@ POSTS = [
     ('Dersut D\'Caffé', 'Michela Sartor', 4, "Colazione prima di andare al lavoro: brioche alla crema appena sfornata e caffè fatto bene.", 30, False),
     ('Approdo Motonavi Burano', None, 4, "Ritorno da Burano con il battello delle 16. Consiglio: sedetevi a poppa per vedere la laguna che si allontana.", 34, True),
     ('Local Impact', 'Giacomo Pertile', 4, "Regali di Natale anticipati: miele del Sile e taccuini in carta riciclata fatti a mano.", 38, False),
+    # Tappe dei viaggi demo (TRIP_STORIES): in coda, così gli id dei post precedenti non cambiano.
+    ('Ponte di Rialto', 'Emma Clarke', 5, "Day one: dropped the bags and walked straight to Rialto. The Grand Canal never gets old.", 6, False),
+    ("All'Arco", 'Emma Clarke', 5, "Cicchetti crawl, stop one. Baccalà on polenta and a glass of white standing at the counter.", 5, False),
+    ("Gallerie dell'Accademia", 'Emma Clarke', 4, "Rainy afternoon well spent. Bellini, Giorgione and almost nobody in the rooms.", 5, False),
+    ('Fondamenta della Misericordia', 'Giulia Bertoldi', 5, "Prima sera del weekend: spritz sul rio e chiacchiere fino a tardi.", 8, False),
+    ('Palazzo Albrizzi', 'Giulia Bertoldi', 5, "Visita guidata agli stucchi di Palazzo Albrizzi: meraviglia pura.", 7, False),
+]
+
+# --- Viaggi nel feed: raccolte di post ------------------------------------------
+# (autore o None per l'utente 1, titolo, destinazione, racconto, indici in POSTS)
+TRIP_STORIES = [
+    (None, 'Weekend a Venezia', 'Venezia', "Tre giorni tra ponti all'alba, bacari e musei. La laguna con calma, senza correre.", [2, 1, 0]),
+    ('Emma Clarke', 'A week in the lagoon', 'Venezia e Burano', "My first long stay in Venice: early ferries, slow lunches and every colour of Burano.", [20, 21, 22, 5]),
+    ('Giulia Bertoldi', 'Cannaregio da vivere', 'Venezia', "Un weekend tutto in Cannaregio, tra musica, palazzi e la Fondamenta al tramonto.", [23, 24, 6]),
 ]
 
 # --- Commenti ai post ---------------------------------------------------------
@@ -230,6 +245,26 @@ def remove(c):
     c.execute("DELETE FROM social_posts WHERE id LIKE 'seed-%' OR id LIKE 'review-seed-%'")
     c.execute("DELETE FROM comments WHERE id LIKE 'seed-%'")
     c.execute("DELETE FROM trips WHERE id LIKE 'seed-%'")
+    c.execute("DELETE FROM trip_story_posts WHERE story_id LIKE 'seed-%'")
+    c.execute("DELETE FROM trip_stories WHERE id LIKE 'seed-%'")
+
+
+def seed_trip_stories(c, me):
+    """Demo trips in the feed, built from demo posts (only those present in the database)."""
+    n = 0
+    for author, title, destination, body, indexes in TRIP_STORIES:
+        ids = [sid('post', POSTS[i][0], str(i)) for i in indexes]
+        rows = c.execute(f"SELECT id, created_at FROM social_posts WHERE id IN ({','.join('?' * len(ids))})", ids).fetchall()
+        if len(rows) < 2:
+            continue
+        days = sorted(r['created_at'][:10] for r in rows)
+        story = sid('story', title)
+        c.execute('INSERT OR REPLACE INTO trip_stories(id,user_id,author,title,destination,start_date,end_date,body,created_at) VALUES(?,?,?,?,?,?,?,?,?)',
+                  (story, 1 if author is None else None, author or me, title, destination, days[0], days[-1], body, max(r['created_at'] for r in rows)))
+        c.execute('DELETE FROM trip_story_posts WHERE story_id=?', (story,))
+        c.executemany('INSERT INTO trip_story_posts(story_id,post_id) VALUES(?,?)', [(story, r['id']) for r in rows])
+        n += 1
+    return n
 
 
 def main():
@@ -253,6 +288,21 @@ def main():
         if '--remove' in sys.argv:
             remove(c)
             print('Dati demo rimossi.')
+            return
+        if '--trips' in sys.argv:
+            # Non distruttivo: aggiunge le tappe mancanti e ricrea solo i viaggi demo.
+            me = c.execute('SELECT name FROM profile WHERE id=1').fetchone()['name']
+            known = {json.loads(r['payload'])['name']: json.loads(r['payload']) for r in c.execute('SELECT payload FROM place_catalog')}
+            for author, *_ in TRIP_STORIES:
+                if author:
+                    c.execute('INSERT OR IGNORE INTO author_profiles VALUES(?,?,?,?,1)', (sid('author', author), author, AUTHOR_BIOS[authors.index(author)], portraits[author]))
+            for i in sorted({i for *_, idx in TRIP_STORIES for i in idx}):
+                name, author, rating, body, days, _ = POSTS[i]
+                if name in known:
+                    c.execute('INSERT OR IGNORE INTO social_posts(id,place_id,author,body,rating,photo,created_at,saved,mine,user_id) VALUES(?,?,?,?,?,?,?,0,?,?)',
+                              (sid('post', name, str(i)), known[name]['id'], author or me, body, rating, photos[PHOTO_BY_PLACE[name]], ago(days),
+                               int(author is None), 1 if author is None else None))
+            print(f'Viaggi demo nel feed: {seed_trip_stories(c, me)}.')
             return
 
         places = {}
@@ -294,7 +344,9 @@ def main():
                 c.execute('INSERT INTO social_comments(id,post_id,author,body,created_at) VALUES(?,?,?,?,?)', (sid('pc', post_id, str(j)), post_id, c_author, c_body, when))
                 n_comments += 1
 
-    print(f'Profili demo: {len(authors)}. Inseriti: {len(TRIPS)} viaggi, {n_reviews} recensioni, {len(POSTS)} post con foto, {n_comments} commenti ai post.')
+        n_stories = seed_trip_stories(c, me)
+
+    print(f'Profili demo: {len(authors)}. Inseriti: {len(TRIPS)} viaggi, {n_reviews} recensioni, {len(POSTS)} post con foto, {n_comments} commenti ai post, {n_stories} viaggi nel feed.')
 
 
 if __name__ == '__main__':

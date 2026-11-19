@@ -128,6 +128,32 @@ struct SocialPost: Decodable, Identifiable {
     let author_key: String?
     var following: Bool?
 }
+// A complete holiday in the feed: a collection of the author's posts.
+struct TripStory: Decodable, Identifiable {
+    let id, title, destination, start_date, end_date, body, author, created_at: String
+    let author_key: String?
+    let author_photo: String?
+    let mine: Bool
+    var following: Bool
+    let is_demo: Bool?
+    let post_count, place_count: Int
+    var posts: [SocialPost]
+    var days: Int {
+        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; f.locale = Locale(identifier: "en_US_POSIX")
+        guard let a = f.date(from: start_date), let b = f.date(from: end_date) else { return 1 }
+        return max(1, (Calendar.current.dateComponents([.day], from: a, to: b).day ?? 0) + 1)
+    }
+    var dateRange: String {
+        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; f.locale = Locale(identifier: "en_US_POSIX")
+        guard let a = f.date(from: start_date), let b = f.date(from: end_date) else { return "" }
+        let it = Locale(identifier: "it_IT")
+        if start_date == end_date { return a.formatted(.dateTime.day().month(.wide).year().locale(it)) }
+        let sameYear = Calendar.current.component(.year, from: a) == Calendar.current.component(.year, from: b)
+        let start = sameYear ? a.formatted(.dateTime.day().month(.abbreviated).locale(it)) : a.formatted(.dateTime.day().month(.abbreviated).year().locale(it))
+        return start + " – " + b.formatted(.dateTime.day().month(.abbreviated).year().locale(it))
+    }
+}
+struct TripStoryPage: Decodable { let trips: [TripStory]; let has_more: Bool }
 struct CityResult: Equatable {
     let name: String
     let region, country: String?
@@ -285,6 +311,11 @@ struct Message: Identifiable { var id = UUID().uuidString; let text: String; let
     @Published var myPostsLoaded = false
     @Published var myPostsError: String?
     @Published var personFeed: [SocialPost] = []
+    @Published var tripStories: [TripStory] = []
+    @Published var tripStoriesLoading = false
+    @Published var tripStoriesError: String?
+    @Published var tripStoriesHasMore = false
+    private var tripRequestID = UUID()
     @Published var conversations: [Conversation] = []
     @Published var groups: [TripGroup] = []
     @Published var unreadChats = 0
@@ -310,6 +341,31 @@ struct Message: Identifiable { var id = UUID().uuidString; let text: String; let
     @AppStorage("appleSearchEnabled") var appleSearchEnabled = true
     @AppStorage("viewportSearchEnabled") var viewportSearchEnabled = true
     @AppStorage("apiURL") var apiURL = "http://100.90.158.14:8000"
+    /// Addresses of the Mac baked in by ios/install.sh (Bonjour name, LAN IP, Tailscale IP).
+    private static let backendCandidates: [String] = ((Bundle.main.object(forInfoDictionaryKey: "RoamBackendCandidates") as? String) ?? "")
+        .split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { $0.hasPrefix("http") }
+    /// Keeps the current URL if the backend answers there, otherwise switches to the first Mac address that does.
+    /// Returns true when the URL changed.
+    @discardableResult func discoverBackend() async -> Bool {
+        var seen = Set<String>()
+        let candidates = ([apiURL] + Self.backendCandidates).filter { seen.insert($0).inserted }
+        let found = await withTaskGroup(of: (Int, String?).self) { group in
+            for (index, base) in candidates.enumerated() {
+                group.addTask {
+                    guard let url = URL(string: base + "/health") else { return (index, nil) }
+                    var request = URLRequest(url: url); request.timeoutInterval = 3
+                    let ok = ((try? await URLSession.shared.data(for: request))?.1 as? HTTPURLResponse)?.statusCode == 200
+                    return (index, ok ? base : nil)
+                }
+            }
+            var results: [(Int, String)] = []
+            for await (index, base) in group { if let base { results.append((index, base)) } }
+            return results.min { $0.0 < $1.0 }?.1
+        }
+        guard let found, found != apiURL else { return false }
+        apiURL = found
+        return true
+    }
     func request<T: Decodable>(_ path: String, method: String = "GET", body: Data? = nil) async throws -> T {
         guard let url = URL(string: apiURL + path), ["http", "https"].contains(url.scheme ?? "") else { throw URLError(.badURL) }
         var request = authorized(url, method: method); request.httpBody = body
@@ -354,7 +410,7 @@ struct Message: Identifiable { var id = UUID().uuidString; let text: String; let
             profile = try await request("/profile")
             stats = try await request("/stats")
             accountError = nil
-        } catch { if !Task.isCancelled { accountError = "Viaggi e profilo non sincronizzati. Controlla Tailscale e il backend." } }
+        } catch { if !Task.isCancelled { accountError = "Viaggi e profilo non sincronizzati. Controlla la rete e che il backend sia acceso sul Mac." } }
         if preferences == nil, let loaded: TravelPreferences = try? await request("/me/preferences") {
             preferences = loaded; needsOnboarding = loaded.onboarded != true
         }
@@ -560,6 +616,36 @@ struct Message: Identifiable { var id = UUID().uuidString; let text: String; let
             socialHasMore = result.has_more
         } catch { if !Task.isCancelled && token == socialRequestID { socialError = "Feed non sincronizzato. Controlla la connessione e riprova." } }
     }
+    func loadTripStories(scope: String, append: Bool = false) async {
+        let token = UUID(); tripRequestID = token
+        tripStoriesLoading = true; tripStoriesError = nil
+        if !append { tripStoriesHasMore = false }
+        defer { if tripRequestID == token { tripStoriesLoading = false } }
+        do {
+            let result: TripStoryPage = try await request("/feed/trips?scope=\(scope)&offset=\(append ? tripStories.count : 0)")
+            try Task.checkCancellation()
+            guard token == tripRequestID else { return }
+            tripStories = append ? tripStories + result.trips : result.trips
+            tripStoriesHasMore = result.has_more
+        } catch { if !Task.isCancelled && token == tripRequestID { tripStoriesError = "Viaggi non sincronizzati. Controlla la connessione e riprova." } }
+    }
+    func tripStory(_ id: String) async throws -> TripStory { try await request("/feed/trips/" + id) }
+    func publishTripStory(title: String, destination: String, start: Date, end: Date, body: String, posts: [String]) async throws -> TripStory {
+        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; f.locale = Locale(identifier: "en_US_POSIX")
+        let payload = try JSONSerialization.data(withJSONObject: ["title": title, "destination": destination, "start_date": f.string(from: start), "end_date": f.string(from: end), "body": body, "post_ids": posts])
+        let story: TripStory = try await request("/feed/trips", method: "POST", body: payload)
+        tripStories.insert(story, at: 0)
+        return story
+    }
+    func deleteTripStory(_ story: TripStory) async -> Bool {
+        do {
+            guard let url = URL(string: apiURL + "/feed/trips/" + story.id) else { throw URLError(.badURL) }
+            let (_, response) = try await URLSession.shared.data(for: authorized(url, method: "DELETE"))
+            guard (response as? HTTPURLResponse)?.statusCode == 204 else { throw URLError(.badServerResponse) }
+            tripStories.removeAll { $0.id == story.id }
+            return true
+        } catch { self.error = "Eliminazione non riuscita. Riprova."; return false }
+    }
     func toggleSaved(_ post: SocialPost) async {
         do {
             let payload = try JSONSerialization.data(withJSONObject: ["saved": !post.saved])
@@ -573,6 +659,7 @@ struct Message: Identifiable { var id = UUID().uuidString; let text: String; let
         if let index = socialPosts.firstIndex(where: { $0.id == id }) { change(&socialPosts[index]) }
         if let index = myPosts.firstIndex(where: { $0.id == id }) { change(&myPosts[index]) }
         if let index = personFeed.firstIndex(where: { $0.id == id }) { change(&personFeed[index]) }
+        for t in tripStories.indices { if let index = tripStories[t].posts.firstIndex(where: { $0.id == id }) { change(&tripStories[t].posts[index]) } }
     }
     // Free-text Apple Maps search used by Cerca; only runs when the user opted in to Apple search.
     func searchPlaces(_ query: String, near coordinate: CLLocationCoordinate2D, category fallback: String? = nil) async throws -> [Place] {
@@ -724,6 +811,8 @@ struct Message: Identifiable { var id = UUID().uuidString; let text: String; let
             let (_, response) = try await URLSession.shared.data(for: req)
             guard (response as? HTTPURLResponse)?.statusCode == 204 else { throw URLError(.badServerResponse) }
             socialPosts.removeAll { $0.id == post.id }; myPosts.removeAll { $0.id == post.id }; personFeed.removeAll { $0.id == post.id }
+            for t in tripStories.indices { tripStories[t].posts.removeAll { $0.id == post.id } }
+            tripStories.removeAll { $0.mine && $0.post_count <= 2 && $0.posts.count < 2 }  // the server drops trips left with one post
             stats.posts = max(0, stats.posts - 1)
             return true
         } catch { self.error = "Eliminazione non riuscita. Riprova."; return false }
@@ -781,7 +870,13 @@ struct RootView: View {
     @EnvironmentObject var store: Store
     @EnvironmentObject var location: LocationService
     var body: some View {
-        if store.token == nil { LoginView() } else { tabs }
+        Group { if store.token == nil { LoginView() } else { tabs } }
+            // Finds the Mac's backend on every launch and return to the app, even if its IP changed.
+            .task { await findBackend() }
+            .onChange(of: scenePhase) { _, phase in if phase == .active { Task { await findBackend() } } }
+    }
+    private func findBackend() async {
+        if await store.discoverBackend(), store.token != nil { await store.load(location.coordinate) }
     }
     private var tabs: some View {
         TabView {
@@ -1346,6 +1441,10 @@ struct SocialFeedView: View {
     @State private var commenting: SocialPost?
     @State private var openedPlace: Place?
     @State private var openedPostID: String?
+    @AppStorage("feedKind") private var kind = "Post"
+    @AppStorage("tripFeedScope") private var tripScope = "Tutti"
+    @State private var composingTrip = false
+    @State private var openedTripID: String?
     private var following: Bool { scope == "Seguiti" }
     private var areaPlaces: [Place] { scope == "Sulla mappa" ? store.mapAreaPlaces ?? store.places : store.places }
     private var queryKey: String { scope + "|" + (scope == "Salvati" ? "saved" : following ? "following-\(store.stats.following)" : areaPlaces.map(\.id).sorted().joined(separator: "|")) }
@@ -1354,6 +1453,10 @@ struct SocialFeedView: View {
         NavigationStack {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
+                    FeedKindSwitch(selection: $kind)
+                    if kind == "Trip" {
+                        TripFeedContent(onCompose: { composingTrip = true }, onOpen: { openedTripID = $0.id })
+                    } else {
                     RoamTabs(options: ["Seguiti", "Vicino a te", "Sulla mappa", "Salvati"], selection: $scope).padding(.horizontal, 16).padding(.top, 4).padding(.bottom, 12)
                     if scope == "Sulla mappa" {
                         Label("I post dei luoghi nell’ultima zona esplorata in Esplora.", systemImage: "map").font(.caption).foregroundStyle(.black).padding(.horizontal, 16).padding(.bottom, 12)
@@ -1387,18 +1490,24 @@ struct SocialFeedView: View {
                     if store.socialHasMore && !store.socialLoading {
                         Color.clear.frame(height: 1).onAppear { Task { await store.loadSocialFeed(ids: areaPlaces.map(\.id), savedOnly: scope == "Salvati", following: following, append: true) } }
                     }
+                    }
                 }
             }.background { GlassBackdrop() }.navigationTitle("Feed").roamHeader()
                 .toolbar {
-                    ToolbarItem(placement: .primaryAction) { Button { composing = true } label: { Image(systemName: "plus.app") }.accessibilityLabel("Pubblica un’esperienza") }
+                    ToolbarItem(placement: .primaryAction) {
+                        Button { if kind == "Trip" { composingTrip = true } else { composing = true } } label: { Image(systemName: kind == "Trip" ? "rectangle.stack.badge.plus" : "plus.app") }
+                            .accessibilityLabel(kind == "Trip" ? "Crea un viaggio" : "Pubblica un’esperienza")
+                    }
                 }
                 .task(id: queryKey) {
                     do { try await Task.sleep(for: .milliseconds(350)); try Task.checkCancellation() } catch { return }
                     await reload()
                 }
-                .refreshable { await reload() }
+                .refreshable { if kind == "Trip" { await store.loadTripStories(scope: TripFeedContent.apiScope(tripScope)) } else { await reload() } }
                 .sheet(isPresented: $composing) { SocialComposer(places: store.knownPlaces) { _ in Task { await reload() } } }
                 .sheet(item: $commenting) { SocialCommentsView(post: $0) }
+                .sheet(isPresented: $composingTrip) { TripStoryComposer { openedTripID = $0.id } }
+                .navigationDestination(item: $openedTripID) { id in if let story = store.tripStories.first(where: { $0.id == id }) { TripStoryDetailView(initial: story) } }
                 .sheet(item: $openedPlace) { PlaceSheet(place: $0) }
                 .navigationDestination(item: $openedPostID) { id in
                     if let post = store.socialPosts.first(where: { $0.id == id }) {
@@ -3099,6 +3208,7 @@ struct ProfileHero<Portrait: View, Stats: View, Actions: View>: View {
 // Where the posts were taken: one pin per place, tap to open its latest post.
 struct PostsMapCard: View {
     let posts: [SocialPost]
+    var title = "La mappa dei viaggi"
     let onOpen: (SocialPost) -> Void
     private var places: [(Place, SocialPost)] {
         var seen = Set<String>()
@@ -3107,7 +3217,7 @@ struct PostsMapCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Label("La mappa dei viaggi", systemImage: "map").font(.subheadline.bold()).foregroundStyle(.black)
+                Label(title, systemImage: "map").font(.subheadline.bold()).foregroundStyle(.black)
                 Spacer()
                 Text(places.count == 1 ? "1 luogo" : "\(places.count) luoghi").font(.caption.weight(.semibold)).foregroundStyle(RoamStyle.red)
             }
@@ -3680,7 +3790,7 @@ struct LoginView: View {
     }
     private func loadConfig() async {
         do { config = try await store.request("/auth/config"); failure = nil }
-        catch { failure = "Server non raggiungibile. Controlla Tailscale e il backend." }
+        catch { failure = "Server non raggiungibile. Controlla la rete e che il backend sia acceso sul Mac." }
     }
     private func finish(_ path: String, _ body: [String: String]) async {
         busy = true; defer { busy = false }
